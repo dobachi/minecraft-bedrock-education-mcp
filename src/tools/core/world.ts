@@ -1,6 +1,7 @@
 import { BaseTool, SequenceStep } from '../base/tool';
 import { ToolCallResult, InputSchema } from '../../types';
 import { WeatherType } from 'socket-be';
+import { chatBuffer } from '../../utils/chat-buffer';
 
 /**
  * World管理ツール
@@ -8,7 +9,7 @@ import { WeatherType } from 'socket-be';
  */
 export class WorldTool extends BaseTool {
     readonly name = 'world';
-    readonly description = 'World management: control time/weather/environment. Actions: set_time(day/night/specific_time), set_weather(clear/rain/thunder), set_difficulty(peaceful/easy/normal/hard), set_spawn(coordinates), query_info(world_stats). Perfect for setting scene atmosphere, testing conditions, or creating specific environments. Examples: dawn=0, noon=6000, dusk=12000, midnight=18000';
+    readonly description = 'World management: control time/weather/environment. Actions: set_time(day/night/specific_time), set_weather(clear/rain/thunder), set_difficulty(peaceful/easy/normal/hard), set_spawn(coordinates), query_info(world_stats). Perfect for setting scene atmosphere, testing conditions, or creating specific environments. Examples: dawn=0, noon=6000, dusk=12000, midnight=18000. Also get_chat: read what players typed in the in-game chat (returns unread messages and marks them read) - use this to actually converse with players, since chat does not reach you on its own.';
     
     readonly inputSchema: InputSchema = {
         type: 'object',
@@ -19,7 +20,7 @@ export class WorldTool extends BaseTool {
                 enum: [
                     'set_time', 'get_time', 'get_day', 'set_weather', 'get_weather',
                     'get_players', 'get_world_info', 'send_message', 'run_command',
-                    'get_connection_info', 'sequence'
+                    'get_connection_info', 'get_chat', 'clear_chat', 'sequence'
                 ]
             },
             time: {
@@ -50,6 +51,16 @@ export class WorldTool extends BaseTool {
                 type: 'string',
                 description: 'Minecraft Bedrock Edition command to execute (without /). For correct syntax and available commands, use the minecraft_wiki tool to search for specific command information. Examples: "give @p diamond_sword", "tp @p 0 64 0", "setblock ~ ~ ~ stone"'
             },
+            limit: {
+                type: 'number',
+                description: 'Max number of chat messages to return for get_chat (default 50)',
+                minimum: 1,
+                maximum: 200
+            },
+            include_read: {
+                type: 'boolean',
+                description: 'For get_chat: return recent messages including already-read ones, without advancing the read cursor (default false = unread only)'
+            },
             steps: {
                 type: 'array',
                 description: 'Array of world actions for sequence. Each step should have "type" field and relevant parameters.'
@@ -69,6 +80,8 @@ export class WorldTool extends BaseTool {
      * @param args.message - ブロードキャストメッセージ
      * @param args.target - メッセージ送信対象（省略時は全プレイヤー）
      * @param args.command - 実行するMinecraftコマンド
+     * @param args.limit - get_chat で返す最大件数
+     * @param args.include_read - get_chat で既読分も含めるか
      * @returns ツール実行結果
      */
     async execute(args: {
@@ -79,8 +92,17 @@ export class WorldTool extends BaseTool {
         message?: string;
         target?: string;
         command?: string;
+        limit?: number;
+        include_read?: boolean;
         steps?: SequenceStep[];
     }): Promise<ToolCallResult> {
+        // チャット読み出しはバッファ参照のみで、ワールド接続を必要としない
+        if (args.action === 'get_chat') return this.getChat(args.limit, args.include_read);
+        if (args.action === 'clear_chat') {
+            chatBuffer.clear();
+            return { success: true, message: 'Chat buffer cleared', data: { action: 'clear_chat', timestamp: Date.now() } };
+        }
+
         if (!this.world) {
             return { success: false, message: 'World not available. Ensure Minecraft is connected.' };
         }
@@ -194,6 +216,44 @@ export class WorldTool extends BaseTool {
                 message: `World management error: ${error instanceof Error ? error.message : String(error)}`
             };
         }
+    }
+
+    /**
+     * バッファに溜まったゲーム内チャットを取り出します
+     *
+     * 既定では未読分のみを返し、返した分を既読にします。
+     * include_read=true の場合は直近のログを既読カーソルを動かさずに返します。
+     *
+     * @param limit - 返す最大件数（既定50）
+     * @param includeRead - 既読分も含めるか
+     */
+    private getChat(limit: number = 50, includeRead: boolean = false): ToolCallResult {
+        const max = Math.min(Math.max(limit ?? 50, 1), 200);
+        const entries = includeRead ? chatBuffer.getRecent(max) : chatBuffer.getUnread(max);
+
+        if (!includeRead && entries.length > 0) {
+            chatBuffer.markRead(entries[entries.length - 1].id);
+        }
+
+        const message = entries.length === 0
+            ? (includeRead ? 'No chat messages buffered' : 'No new chat messages')
+            : `${entries.length} chat message(s)`;
+
+        return {
+            success: true,
+            message,
+            data: {
+                action: 'get_chat',
+                result: entries.map(e => ({
+                    time: new Date(e.timestamp).toISOString(),
+                    sender: e.sender,
+                    message: e.message,
+                    type: e.type
+                })),
+                unreadRemaining: chatBuffer.unreadCount,
+                timestamp: Date.now()
+            }
+        };
     }
 
     private getTimeDescription(ticks: number): string {

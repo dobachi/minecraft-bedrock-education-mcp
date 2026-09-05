@@ -40,6 +40,7 @@ import {
   checkResponseSize,
 } from "./utils/token-optimizer";
 import { SchemaToZodConverter } from "./utils/schema-converter";
+import { chatBuffer } from "./utils/chat-buffer";
 import { enrichErrorWithHints } from "./utils/error-hints";
 
 /**
@@ -179,6 +180,35 @@ export class MinecraftMCPServer {
     this.socketBE.on(ServerEvent.PlayerLeave, (ev: any) => {
       this.handlePlayerLeave(ev);
     });
+
+    // ゲーム内チャットをバッファへ蓄積（world get_chat で取り出す）
+    // 注意: socket-be は「接続確立時点で登録済みのリスナー」から購読する
+    // イベントを決めるため、この登録は起動時に行う必要がある
+    this.socketBE.on(ServerEvent.PlayerChat, (ev: any) => {
+      this.handlePlayerChat(ev, "chat");
+    });
+
+    // /say /me /tell 由来の発言も拾う
+    // （こちらから送る tellraw は Title 扱いなので自分の発言は混ざらない）
+    this.socketBE.on(ServerEvent.PlayerMessage, (ev: any) => {
+      this.handlePlayerChat(ev, ev?.type ?? "message");
+    });
+  }
+
+  /**
+   * ゲーム内チャット受信時の処理
+   * @private
+   */
+  private handlePlayerChat(ev: any, type: string): void {
+    const sender = ev?.sender?.name ?? "unknown";
+    const message = ev?.message ?? "";
+    if (!message) return;
+
+    chatBuffer.add(sender, message, type);
+
+    if (process.stdin.isTTY !== false) {
+      console.error(`[chat/${type}] <${sender}> ${message}`);
+    }
   }
 
   /**
