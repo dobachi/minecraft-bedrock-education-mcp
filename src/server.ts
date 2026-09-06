@@ -41,6 +41,7 @@ import {
 } from "./utils/token-optimizer";
 import { SchemaToZodConverter } from "./utils/schema-converter";
 import { chatBuffer } from "./utils/chat-buffer";
+import { eventBuffer } from "./utils/event-buffer";
 import { enrichErrorWithHints } from "./utils/error-hints";
 
 /**
@@ -193,6 +194,36 @@ export class MinecraftMCPServer {
     this.socketBE.on(ServerEvent.PlayerMessage, (ev: any) => {
       this.handlePlayerChat(ev, ev?.type ?? "message");
     });
+
+    // 的ブロックへの命中。矢が中心に近いほど redstoneLevel が大きい（0-15）
+    this.socketBE.on(ServerEvent.TargetBlockHit, (ev: any) => {
+      this.handleTargetBlockHit(ev);
+    });
+  }
+
+  /**
+   * 的ブロック命中時の処理
+   *
+   * イベントは「誰が撃ったか」と「レッドストーン出力」しか持たず、
+   * どの的に当たったかは分からない。出力(0-15)が中心への近さを表すので、
+   * それをそのまま精度として扱う。射手の位置は rawPlayer から取れるので、
+   * 的からの距離を測りたいときのために残しておく。
+   *
+   * @private
+   */
+  private handleTargetBlockHit(ev: any): void {
+    const player = ev?.player?.name ?? "unknown";
+    const level = ev?.redstoneLevel ?? 0;
+    const pos = ev?.rawPlayer?.position;
+    const where = pos
+      ? ` from (${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)})`
+      : "";
+
+    eventBuffer.add(player, `level=${level}${where}`, "target");
+
+    if (process.stdin.isTTY !== false) {
+      console.error(`[event/target] <${player}> level=${level}${where}`);
+    }
   }
 
   /**

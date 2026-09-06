@@ -1,7 +1,8 @@
 import { BaseTool, SequenceStep } from '../base/tool';
 import { ToolCallResult, InputSchema } from '../../types';
 import { WeatherType } from 'socket-be';
-import { chatBuffer } from '../../utils/chat-buffer';
+import { chatBuffer, ChatBuffer } from '../../utils/chat-buffer';
+import { eventBuffer } from '../../utils/event-buffer';
 
 /**
  * World管理ツール
@@ -9,7 +10,7 @@ import { chatBuffer } from '../../utils/chat-buffer';
  */
 export class WorldTool extends BaseTool {
     readonly name = 'world';
-    readonly description = 'World management: control time/weather/environment. Actions: set_time(day/night/specific_time), set_weather(clear/rain/thunder), set_difficulty(peaceful/easy/normal/hard), set_spawn(coordinates), query_info(world_stats). Perfect for setting scene atmosphere, testing conditions, or creating specific environments. Examples: dawn=0, noon=6000, dusk=12000, midnight=18000. Also get_chat: read what players typed in the in-game chat (returns unread messages and marks them read) - use this to actually converse with players, since chat does not reach you on its own.';
+    readonly description = 'World management: control time/weather/environment. Actions: set_time(day/night/specific_time), set_weather(clear/rain/thunder), set_difficulty(peaceful/easy/normal/hard), set_spawn(coordinates), query_info(world_stats). Perfect for setting scene atmosphere, testing conditions, or creating specific environments. Examples: dawn=0, noon=6000, dusk=12000, midnight=18000. Also get_chat: read what players typed in the in-game chat (returns unread messages and marks them read) - use this to actually converse with players, since chat does not reach you on its own. And get_events: read buffered world events such as target block hits (sender is the player, message carries the details, type is the event kind).';
     
     readonly inputSchema: InputSchema = {
         type: 'object',
@@ -20,7 +21,7 @@ export class WorldTool extends BaseTool {
                 enum: [
                     'set_time', 'get_time', 'get_day', 'set_weather', 'get_weather',
                     'get_players', 'get_world_info', 'send_message', 'run_command',
-                    'get_connection_info', 'get_chat', 'clear_chat', 'sequence'
+                    'get_connection_info', 'get_chat', 'clear_chat', 'get_events', 'clear_events', 'sequence'
                 ]
             },
             time: {
@@ -59,7 +60,7 @@ export class WorldTool extends BaseTool {
             },
             include_read: {
                 type: 'boolean',
-                description: 'For get_chat: return recent messages including already-read ones, without advancing the read cursor (default false = unread only)'
+                description: 'For get_chat and get_events: return recent entries including already-read ones, without advancing the read cursor (default false = unread only)'
             },
             steps: {
                 type: 'array',
@@ -101,6 +102,11 @@ export class WorldTool extends BaseTool {
         if (args.action === 'clear_chat') {
             chatBuffer.clear();
             return { success: true, message: 'Chat buffer cleared', data: { action: 'clear_chat', timestamp: Date.now() } };
+        }
+        if (args.action === 'get_events') return this.getBuffered(eventBuffer, 'get_events', args.limit, args.include_read);
+        if (args.action === 'clear_events') {
+            eventBuffer.clear();
+            return { success: true, message: 'Event buffer cleared', data: { action: 'clear_events', timestamp: Date.now() } };
         }
 
         if (!this.world) {
@@ -228,29 +234,42 @@ export class WorldTool extends BaseTool {
      * @param includeRead - 既読分も含めるか
      */
     private getChat(limit: number = 50, includeRead: boolean = false): ToolCallResult {
+        return this.getBuffered(chatBuffer, 'get_chat', limit, includeRead);
+    }
+
+    /**
+     * リングバッファの中身を取り出す共通処理（チャットとイベントで共有）
+     *
+     * @param buffer - 対象のバッファ
+     * @param action - 応答に載せるアクション名
+     * @param limit - 返す最大件数（既定50）
+     * @param includeRead - 既読分も含めるか
+     */
+    private getBuffered(buffer: ChatBuffer, action: string, limit: number = 50, includeRead: boolean = false): ToolCallResult {
         const max = Math.min(Math.max(limit ?? 50, 1), 200);
-        const entries = includeRead ? chatBuffer.getRecent(max) : chatBuffer.getUnread(max);
+        const entries = includeRead ? buffer.getRecent(max) : buffer.getUnread(max);
 
         if (!includeRead && entries.length > 0) {
-            chatBuffer.markRead(entries[entries.length - 1].id);
+            buffer.markRead(entries[entries.length - 1].id);
         }
 
+        const label = action === 'get_events' ? 'event' : 'chat message';
         const message = entries.length === 0
-            ? (includeRead ? 'No chat messages buffered' : 'No new chat messages')
-            : `${entries.length} chat message(s)`;
+            ? (includeRead ? `No ${label}s buffered` : `No new ${label}s`)
+            : `${entries.length} ${label}(s)`;
 
         return {
             success: true,
             message,
             data: {
-                action: 'get_chat',
+                action,
                 result: entries.map(e => ({
                     time: new Date(e.timestamp).toISOString(),
                     sender: e.sender,
                     message: e.message,
                     type: e.type
                 })),
-                unreadRemaining: chatBuffer.unreadCount,
+                unreadRemaining: buffer.unreadCount,
                 timestamp: Date.now()
             }
         };
