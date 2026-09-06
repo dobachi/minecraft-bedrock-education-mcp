@@ -231,12 +231,27 @@ export class MinecraftMCPServer {
    * ワールド初期化をスケジュール
    * @private
    */
+  /**
+   * 現在つながっているワールドのうち、有効なものを1つ返します
+   *
+   * socketBE.worlds には切断済みのワールドが残ることがあるため、
+   * 先頭を無条件に採るのではなく isValid が true のものを選ぶ。
+   *
+   * @returns 有効なワールド。無ければ null
+   * @private
+   */
+  private pickValidWorld(): World | null {
+    const worlds = this.socketBE?.worlds;
+    if (!worlds || !(worlds instanceof Map) || worlds.size === 0) return null;
+    return Array.from(worlds.values()).find((w) => w.isValid) ?? null;
+  }
+
   private scheduleWorldInitialization(delayMs: number): void {
     setTimeout(async () => {
       try {
-        const worlds = this.socketBE?.worlds;
-        if (worlds && worlds instanceof Map && worlds.size > 0) {
-          await this.initializeWorld(Array.from(worlds.values())[0]);
+        const world = this.pickValidWorld();
+        if (world) {
+          await this.initializeWorld(world);
           await this.sendWorldMessage("§a[MCP Server] 接続完了！AIツールが利用可能になりました。");
         }
       } catch (error) {
@@ -251,12 +266,27 @@ export class MinecraftMCPServer {
    */
   private startPeriodicWorldCheck(intervalMs: number): void {
     setInterval(async () => {
-      if (!this.currentWorld && this.socketBE) {
-        const worlds = this.socketBE.worlds;
-        if (worlds instanceof Map && worlds.size > 0) {
-          await this.initializeWorld(Array.from(worlds.values())[0]);
-          await this.sendWorldMessage("§a[MCP Server] 遅延接続完了！AIツールが利用可能になりました。");
-        }
+      // 掴んでいるワールドが有効なら何もしない。
+      //
+      // 条件を「未取得のときだけ」にすると、Minecraft が再接続したあとも
+      // 死んだ World を掴んだままになり、以後すべてのコマンドが
+      // "Invalid connection" で失敗し続ける（実測で発生）。
+      // 掴んでいても isValid が false なら取り直す必要がある。
+      if (this.currentWorld?.isValid) return;
+
+      try {
+        const world = this.pickValidWorld();
+        if (!world || world === this.currentWorld) return;
+
+        const reconnected = this.currentWorld !== null;
+        await this.initializeWorld(world);
+        await this.sendWorldMessage(
+          reconnected
+            ? "§a[MCP Server] 再接続を検出しました。AIツールが利用可能です。"
+            : "§a[MCP Server] 遅延接続完了！AIツールが利用可能になりました。"
+        );
+      } catch (error) {
+        // 取り直しの失敗は無視して次の巡回に任せる
       }
     }, intervalMs);
   }
@@ -320,18 +350,19 @@ export class MinecraftMCPServer {
       console.error("新しいプレイヤーが参加しました:", ev.player.name);
     }
 
-    // Minecraft側に参加確認メッセージを送信
-    await this.sendWorldMessage(
-      `§b[MCP Server] §f${ev.player.name}さん、ようこそ！AIアシスタントが利用可能です。`
-    );
-
+    // ワールドの差し替えを最初に行う。
+    //
+    // 以前はここで先に参加確認メッセージを送っていたが、直前の接続が死んで
+    // いる場合、古い World への送信がタイムアウトするまで待たされる。その間
+    // ツールは死んだ World を掴んだままなので、あらゆる操作が失敗する。
+    // 「掴み直し」は「挨拶」より先。
+    this.currentWorld = ev.world;
     this.connectedPlayer = {
       ws: null, // SocketBEではws直接アクセス不要
       name: ev.player.name || "unknown",
       id: uuidv4(),
     };
-
-    this.currentWorld = ev.world;
+    this.updateToolsWithWorldInstances();
 
     // エージェントを取得
     try {
@@ -343,8 +374,13 @@ export class MinecraftMCPServer {
       this.currentAgent = null;
     }
 
-    // 全ツールのSocket-BEインスタンスを更新
+    // エージェントの取得結果を反映
     this.updateToolsWithWorldInstances();
+
+    // Minecraft側に参加確認メッセージを送信（新しいワールド宛て）
+    await this.sendWorldMessage(
+      `§b[MCP Server] §f${ev.player.name}さん、ようこそ！AIアシスタントが利用可能です。`
+    );
   }
 
   /**
